@@ -122,7 +122,8 @@ class Analysis:
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         return bin_centers, counts
 
-    def acf(self, data, N, type='AKF'):
+    @staticmethod
+    def acf(data, N, type='AKF'):
         # Вычисляем среднее значение данных
         mean_data = np.mean(data)
         # Инициализация массивов для хранения значений Rxx(L) и Rx(L)
