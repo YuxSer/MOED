@@ -2,6 +2,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import wave
 from scipy.io import wavfile
+from scipy.fftpack import fft, fftshift
+from scipy.signal import butter, filtfilt
+from scipy.fftpack import fft, ifft, fft2, ifft2, fftshift, ifftshift
+from PIL import Image
+from scipy.ndimage import sobel
+from scipy.signal import iirnotch, filtfilt
+import cv2
+
 
 class Model:
     def trend(self, trend_type, a, N, delta):
@@ -39,6 +47,8 @@ class Model:
         xmin, xmax = np.min(noise_data), np.max(noise_data)
         normalized_data = ((noise_data - xmin) / (xmax - xmin) - 0.5) * 2 * R
         return normalized_data
+
+    
 
     def spikes(self, N, M, R, Rs):
         data = np.zeros(N)
@@ -81,6 +91,7 @@ class Model:
         for i in range(N):
             data3.append(data1[i] * data2[i])
         return data3
+
     @staticmethod
     def convModel(x, h, N, M):
         y = []
@@ -91,6 +102,35 @@ class Model:
                     value += x[k - m] * h[m]
             y.append(value)
         return y[M:]
+
+    @staticmethod
+    def add_random_noise(image,std = 5):
+        noise = np.random.normal(0,std,image.shape)
+        noisy_image = image + noise
+        return np.clip(noisy_image, 0, 255).astype(np.uint8)
+
+    @staticmethod
+    def add_impulse_noise(image, prob=0.02):
+        """Добавляет импульсный шум (соль и перец)"""
+        noisy_image = image.copy()
+        num_pixels = int(prob * image.size)
+
+        # Добавляем "соль" (белые пиксели)
+        coords = [np.random.randint(0, i - 1, num_pixels) for i in image.shape]
+        noisy_image[coords[0], coords[1]] = 255
+
+        # Добавляем "перец" (черные пиксели)
+        coords = [np.random.randint(0, i - 1, num_pixels) for i in image.shape]
+        noisy_image[coords[0], coords[1]] = 0
+        return noisy_image
+
+    @staticmethod
+    def add_mixed_noise(image, prob=0.02, std=5):
+        """Добавляет смесь случайного и импульсного шума"""
+        image_with_random = Model.add_random_noise(image, std=std)
+        noisy_image = Model.add_impulse_noise(image_with_random, prob=prob)
+        return noisy_image
+
 
 
 
@@ -240,6 +280,33 @@ class Analysis:
         sigma_N = np.std(noise)
         snr_value = 20 * np.log10(sigma_S / sigma_N)
         return snr_value
+
+    @staticmethod
+    def compute_difference_image(original, processed):
+        return np.clip(original.astype(np.int16) - processed.astype(np.int16), 0, 255).astype(np.uint8)
+
+    @staticmethod
+    def inverseFourier(Re, Im, N):
+        # Восстанавливаем комплексный спектр
+        X_k = Re + 1j * Im
+        recovered_signal = np.fft.ifft(X_k * N).real
+        return recovered_signal
+
+    @staticmethod
+    def Fourier2D(image):
+        # 1. Преобразование Фурье по строкам
+        fft_rows = np.fft.fft(image, axis=1)
+        # 2. Преобразование Фурье по столбцам
+        fft_2d = np.fft.fft(fft_rows, axis=0)
+        return fft_2d
+
+    @staticmethod
+    def inverseFourier2D(fft_2d):
+        # 1. Обратное ПФ по столбцам
+        ifft_columns = np.fft.ifft(fft_2d, axis=0)
+        # 2. Обратное ПФ по строкам
+        recovered_image = np.fft.ifft(ifft_columns, axis=1).real  # Берём только действительную часть
+        return recovered_image
 
 
 class Processing:
@@ -422,6 +489,234 @@ class Processing:
         else:
             print("fc1>=fc2")
 
+    @staticmethod
+    def shift_2D(data2D, C):
+        return np.clip(data2D + C, 0, 255)
+
+    @staticmethod
+    def multModel_2D(data2D, C):
+        """ Умножает каждое значение пикселя на C (изменение контрастности) """
+        return np.clip(data2D * C, 0, 255)
+
+    @staticmethod
+    def resize_nearest_neighbor(image, scale=None, target_size_w=None, target_size_h=None):
+        """ Масштабирование методом ближайшего соседа до заданного размера """
+        src_h, src_w = image.shape
+
+        if target_size_h is None or target_size_w is None:
+            if scale is None:
+                raise ValueError("Нужно передать либо scale, либо target_size_h и target_size_w")
+            target_size_h = int(src_h * scale)
+            target_size_w = int(src_w * scale)
+
+        resized = np.zeros((target_size_h, target_size_w), dtype=image.dtype)
+
+        for i in range(target_size_h):
+            for j in range(target_size_w):
+                src_x = int(j * src_w / target_size_w)
+                src_y = int(i * src_h / target_size_h)
+                resized[i, j] = image[src_y, src_x]
+
+        return resized
+
+    @staticmethod
+    def resize_bilinear(image, scale=None, target_size_w=None, target_size_h=None):
+        """ Масштабирование методом билинейной интерполяции до заданного размера """
+        src_h, src_w = image.shape
+
+        if target_size_h is None or target_size_w is None:
+            if scale is None:
+                raise ValueError("Нужно передать либо scale, либо target_size_h и target_size_w")
+            target_size_h = int(src_h * scale)
+            target_size_w = int(src_w * scale)
+
+        resized = np.zeros((target_size_h, target_size_w), dtype=image.dtype)
+
+        for i in range(target_size_h):
+            for j in range(target_size_w):
+                x = j * (src_w - 1) / (target_size_w - 1)
+                y = i * (src_h - 1) / (target_size_h - 1)
+
+                x1, y1 = int(x), int(y)
+                x2, y2 = min(x1 + 1, src_w - 1), min(y1 + 1, src_h - 1)
+
+                A = image[y1, x1]
+                B = image[y1, x2]
+                C = image[y2, x1]
+                D = image[y2, x2]
+
+                dx, dy = x - x1, y - y1
+
+                pixel = A * (1 - dx) * (1 - dy) + B * dx * (1 - dy) + C * (1 - dx) * dy + D * dx * dy
+                resized[i, j] = int(pixel)
+
+        return resized
+
+
+
+    @staticmethod
+    def negative(image):
+        L = np.max(image)  # Определяем максимальное значение
+        return L - 1 - image  # Применяем формулу
+
+    @staticmethod
+    def gamma_correction(image, gamma, C):
+        image = image.astype(np.float32) / 255.0
+        corrected = C * np.power(image, gamma)
+        return np.clip(corrected * 255, 0, 255).astype(np.uint8)
+
+    @staticmethod
+    def log_transformation(image, C):
+        image = image.astype(np.float32) + 1
+        log_transformed = C * np.log(image)
+        return np.clip(log_transformed * 255 / np.max(log_transformed), 0, 255).astype(np.uint8)
+
+
+    @staticmethod
+    def hist_equalization(image):
+        hist, bins = np.histogram(image.flatten(), 256, [0, 256])
+        hist_norm = hist / hist.sum()
+        cdf = hist_norm.cumsum()
+        L = 255  # Максимальное значение яркости
+        equalized_image = np.interp(image.flatten(), bins[:-1], cdf * L).reshape(image.shape)
+        return equalized_image.astype(np.uint8)
+
+    @staticmethod
+    def detector(data, dy, error=0.01):
+        frequencies = []
+        coresp = []
+        lines = [data[i, :] for i in range(0, data.shape[0], dy)]
+        n = data.shape[1]
+        freqs = np.fft.fftfreq(n, d=1)[:n // 2]
+        mask = (freqs >= 0.25) & (freqs <= 0.5)
+
+        for line in lines:
+            line_deriv = sobel(line, mode='constant')
+            acf_deriv = np.correlate(line_deriv, line_deriv, mode='same')
+            spectrum_acf = np.abs(np.fft.fft(acf_deriv))[:n // 2]
+
+            max_index = np.argmax(spectrum_acf[mask])
+            f0 = freqs[mask][max_index]
+            frequencies.append(f0)
+
+        pairs = list(zip(lines[:-1], lines[1:]))
+        i = 0
+        for line1, line2 in pairs:
+            line1_deriv = sobel(line1, mode='constant')
+            line2_deriv = sobel(line2, mode='constant')
+            ccf = np.correlate(line1_deriv, line2_deriv, mode='same')
+            spectrum_ccf = np.abs(np.fft.fft(ccf))[:n // 2]
+
+            max_index = np.argmax(spectrum_ccf[mask])
+            f0 = freqs[mask][max_index]
+
+            if abs(frequencies[i] - f0) < error:
+                coresp.append((f0 + frequencies[i]) / 2)
+            i += 1
+
+        return np.mean(coresp) if coresp else None
+
+    @staticmethod
+    def suppressor(data, f0, Q):
+        a = max(f0 - Q, 0.25)
+        b = min(f0 + Q, 0.50)
+        _f0 = (a + b) / 2
+        _Q = b - a
+
+        print(f"Подавление в пределах [{a}; {b}]")
+        b, a = iirnotch(_f0, _Q, 1)
+
+        for i in range(data.shape[0]):
+            data[i, :] = filtfilt(b, a, data[i, :])
+        for i in range(data.shape[1]):
+            data[:, i] = filtfilt(b, a, data[:, i])
+
+    @staticmethod
+    def show_fft(data, dy):
+        line1 = data[0, :]  # Первая строка (y=0)
+        line2 = data[dy, :]  # Вторая строка (y=dy)
+
+        n = line1.shape[0]
+        freqs = np.fft.fftfreq(n, d=1)[:n // 2]  # Частоты Фурье
+
+        # 1. Исходный сигнал
+        spectrum_orig = np.abs(np.fft.fft(line1))[:n // 2]
+
+        # 2. Производная строки (Собель)
+        line1_deriv = sobel(line1, mode='constant')
+        spectrum_deriv = np.abs(np.fft.fft(line1_deriv))[:n // 2]
+
+        # 3. АКФ (автокорреляция) производной
+        acf_deriv = np.correlate(line1_deriv, line1_deriv, mode='same')
+        spectrum_acf = np.abs(np.fft.fft(acf_deriv))[:n // 2]
+
+        # 4. ВКФ (взаимнокорреляция) производных строк y=0 и y=dy
+        line2_deriv = sobel(line2, mode='constant')
+        ccf = np.correlate(line1_deriv, line2_deriv, mode='same')
+        spectrum_ccf = np.abs(np.fft.fft(ccf))[:n // 2]
+
+        # Построение графиков
+        plt.figure(figsize=(12, 8))
+
+        # График 1: Спектр исходной строки
+        plt.subplot(4, 1, 1)
+        plt.plot(freqs, spectrum_orig)
+        plt.title('Спектр исходной строки (y=0)')
+        plt.xlabel('Частота')
+
+        # График 2: Спектр производной строки
+        plt.subplot(4, 1, 2)
+        plt.plot(freqs, spectrum_deriv)
+        plt.title('Спектр производной строки (y=0)')
+        plt.xlabel('Частота')
+
+        # График 3: Спектр АКФ производной строки
+        plt.subplot(4, 1, 3)
+        plt.plot(freqs, spectrum_acf)
+        plt.title('Спектр АКФ производной строки (y=0)')
+        plt.xlabel('Частота')
+
+        # График 4: Спектр ВКФ производных строк
+        plt.subplot(4, 1, 4)
+        plt.plot(freqs, spectrum_ccf)
+        plt.title(f'Спектр ВКФ производных строк (y=0 и y={dy})')
+        plt.xlabel('Частота')
+
+        plt.tight_layout()
+        plt.show()
+
+    @staticmethod
+    def apply_mean_filter(image, kernel_size=3):
+        """Усредняющий фильтр"""
+        return cv2.blur(image, (kernel_size, kernel_size))
+
+    @staticmethod
+    def apply_median_filter(image, kernel_size=3):
+        """Медианный фильтр"""
+        return cv2.medianBlur(image, kernel_size)
+
+    @staticmethod
+    def inverseFilter(y, h, alpha=0.05, noise=False):
+        h_padded = np.zeros(len(y))
+        h_padded[:len(h)] = h
+        Y = fft(y)
+        H = fft(h_padded)
+
+        if not noise:
+            threshold = 1e-6 * np.max(np.abs(H))
+            H_safe = np.where(np.abs(H) > threshold, H, threshold)
+            X_hat = Y / H_safe
+        else:
+            H_conj = np.conj(H)
+            X_hat = Y * H_conj / (np.abs(H) ** 2 + alpha ** 2)
+
+        x_restored = np.real(ifft(X_hat))
+
+        if len(x_restored) > 0:
+            x_restored = x_restored * (np.max(x) / np.max(np.abs(x_restored)))
+
+        return x_restored
+
 
 class IN_OUT:
     @staticmethod
@@ -450,6 +745,76 @@ class IN_OUT:
         for i in range(n3,n4):
             data[i] = c2
         return data
+
+    @staticmethod
+    def read_image(filepath):
+        img = Image.open(filepath).convert('L')
+        data = np.array(img, dtype=np.float32)
+        M, N = data.shape
+        print(f"Изображение {filepath}: размеры {M}x{N}")
+        return data, M, N
+
+    @staticmethod
+    def show_image(data, title="Изображение"):
+        plt.imshow(data, cmap='gray')
+        plt.title(title)
+        plt.axis("off")
+        plt.show()
+
+    @staticmethod
+    def save_image(data, filepath):
+        img = Image.fromarray(np.clip(data, 0, 255).astype(np.uint8))
+        img.save(filepath)
+        print(f"Сохранено: {filepath}")
+
+    @staticmethod
+    def normalize_to_grayscale(image):
+        x_min, x_max = image.min(), image.max()
+        return ((image - x_min) / (x_max - x_min) * 255).astype(np.uint8)
+
+    def read_xcr(filename, width, height):
+        with open(filename, 'rb') as f:
+            header = f.read(2048)  # Читаем заголовок (2048 байт)
+            raw_data = f.read(width * height * 2)  # Загружаем нужное количество данных
+            _ = f.read(8192)  # Пропускаем хвост
+
+        # Декодируем в 16-битные числа с перестановкой байтов
+        data = np.frombuffer(raw_data, dtype=np.uint16).reshape((height, width))
+        data = data.byteswap()
+
+        # Поворот на 90 градусов против часовой стрелки
+        rotated_data = np.rot90(data)
+
+        # Приведение к шкале серого
+        grayscale_data = IN_OUT.normalize_to_grayscale(rotated_data)
+
+        return grayscale_data, header
+
+    @staticmethod
+    def save_xcr(filename, image_data, header):
+        """ Сохраняет изображение обратно в файл .xcr """
+        with open(filename, 'wb') as f:
+            f.write(header)  # Записываем заголовок
+            # Преобразуем обратно в 16-битные числа и переставляем байты
+            image_data = (image_data / 255 * 65535).astype(np.uint16).byteswap()
+            f.write(image_data.tobytes())
+            # Записываем пустой хвост
+            f.write(b'\x00' * 8192)
+
+    @staticmethod
+    def save_bin(filename, image_data):
+        with open(filename, 'wb') as f:
+            f.write(image_data.tobytes())
+
+    @staticmethod
+    def extract_fragment(image, fragment_size=(512, 512)):
+        """ Вырезает центральный фрагмент изображения """
+        h, w = image.shape
+        fh, fw = fragment_size
+        start_x, start_y = (w - fw) // 2, (h - fh) // 2
+        return image[start_y:start_y + fh, start_x:start_x + fw]
+
+
 
 model = Model()
 analysis = Analysis()
@@ -1123,7 +1488,7 @@ data3 = model.addModel(data1,harm_data,N)
 
 procData, std_devs = Processing.antiNoise(data3,M_values , N)
 
-'''
+
 
 input_path = "doma.wav"
 data1, rate, N = IN_OUT.readWAV(input_path)
@@ -1137,7 +1502,7 @@ n4 = 28000
 data2 = IN_OUT.rw(c1,c2,n1,n2,n3,n4,N)
 data3 = model.multModel(data1,data2,N)
 
-'''
+
 # Отображение короткого фрагмента (0.5-1 сек)
 duration = min(rate, N)  # 1 секунда или меньше
 time = np.linspace(0, duration / rate, duration)
@@ -1148,13 +1513,13 @@ plt.ylabel("Амплитуда")
 plt.grid(True)
 plt.tight_layout()
 plt.show()
-'''
+
 
 # Пример записи
 output_path = "output.wav"  # Имя выходного файла
 IN_OUT.writeWAV(output_path, data3, rate)
 new_data, new_rate, N = IN_OUT.readWAV(output_path)
-'''
+
 # Отображение короткого фрагмента (0.5-1 сек)
 duration = min(rate, N)  # 1 секунда или меньше
 time = np.linspace(0, duration / rate, duration)
@@ -1213,7 +1578,7 @@ plt.ylabel('Амплитуда')
 plt.title('Амплитудный спектр Фурье')
 plt.tight_layout()
 plt.show()
-'''
+
 
 syllable1 = data1[n1:n2]
 syllable2 = data1[n3:n4]
@@ -1323,7 +1688,7 @@ output_path = "ma2_bpf.wav"  # Имя выходного файла
 IN_OUT.writeWAV(output_path, filt_data3, rate)
 
 
-'''
+
 data_Fourier = data1.astype(np.float32)
 Re,Im = analysis.Fourier(data_Fourier,N)
 Re1,Im1 = analysis.Fourier(syllable1,N1)
@@ -1335,4 +1700,364 @@ halfN2 = N2 // 2
 spectr,freq = analysis.spectrFourier(Re,Im,halfN,delta_t)
 spectr1,freq1 = analysis.spectrFourier(Re1,Im1,halfN1,delta_t)
 spectr2,freq2 = analysis.spectrFourier(Re2,Im2,halfN2,delta_t)
+
+
+
+# Загрузка исходного изображения
+filepath = "grace.jpg"
+data, M, N = IN_OUT.read_image(filepath)
+
+filepath2 = "c12-85v.xcr"
+filepath3 = "u0_2048x2500.xcr"
+dataxcr,header = IN_OUT.read_xcr(filepath2,1024,1024)
+dataxcr3,header3 = IN_OUT.read_xcr(filepath3,2048,2500)
+
+
+negativedata1 = processing.negative(data)
+negativedata2 = processing.negative(dataxcr)
+negativedata3 = processing.negative(dataxcr3)
+IN_OUT.save_image(negativedata3, "xcr2_negative.jpg")
+
+filepath4 = "photo1.jpg"
+filepath5 = "photo2.jpg"
+filepath6 = "photo3.jpg"
+filepath7 = "photo4.jpg"
+filepath8 = "HollywoodLC.jpg"
+
+data4, M4, N4 = IN_OUT.read_image(filepath4)
+data5, M5, N5 = IN_OUT.read_image(filepath5)
+data6, M6, N6 = IN_OUT.read_image(filepath6)
+data7, M7, N7 = IN_OUT.read_image(filepath7)
+data8, M8, N8 = IN_OUT.read_image(filepath8)
+
+data8 = processing.gamma_correction(data8,1.4,1.3)
+
+IN_OUT.save_image(data8, "photo5_new.jpg")
+
+
+
+
+resizedata1 = processing.resize_nearest_neighbor(dataxcr3,0.24)
+resizedata2 = processing.resize_bilinear(dataxcr3,0.24)
+
+IN_OUT.save_image(dataxcr3, "u0_2048x2500.jpg")
+IN_OUT.save_image(resizedata1, "u0_2048x2500_resized1.jpg")
+IN_OUT.save_image(resizedata2, "u0_2048x2500_resized2.jpg")
+# Применение обработки
+C_shift = 100
+C_mult = 1.3
 '''
+
+
+'''
+# Смещение яркости
+shifted_data = processing.shift_2D(data, C_shift)
+IN_OUT.show_image(shifted_data, "После сдвига яркости (+100)")
+IN_OUT.save_image(shifted_data, "grace_shifted.jpg")
+
+# Изменение контрастности (умножение)
+multiplied_data = processing.multModel_2D(data, C_mult)
+IN_OUT.show_image(multiplied_data, "После умножения на 1.3 (контрастность)")
+IN_OUT.save_image(multiplied_data, "grace_multiplied.jpg")
+
+filepath2 = "c12-85v.xcr"
+dataxcr,header = IN_OUT.read_xcr(filepath2)
+data2 = IN_OUT.normalize_to_grayscale(dataxcr)
+IN_OUT.show_image(dataxcr)
+IN_OUT.show_image(data2)
+
+IN_OUT.save_xcr('new_xcr.xcr',data2,header)
+
+# 5.1
+
+filepath2 = "c12-85v.xcr"
+filepath3 = "u0_2048x2500.xcr"
+filepath4 = "photo1.jpg"
+filepath5 = "photo2.jpg"
+filepath6 = "photo3.jpg"
+filepath7 = "photo4.jpg"
+filepath8 = "HollywoodLC.jpg"
+
+image,M,N = in_out.read_image(filepath8)
+
+dataxcr,header = IN_OUT.read_xcr(filepath3,2048,2500)
+
+equalized_image = processing.hist_equalization(dataxcr)
+
+IN_OUT.show_image(dataxcr,"Исходное изображение")
+IN_OUT.show_image(equalized_image,"Эквализированное изображение")
+'''
+# 5.2
+'''
+filepath = "grace.jpg"
+filepath1 = "grace_resized1.jpg"
+filepath2 = "grace_resized2.jpg"
+filepath3 = "grace_resized3.jpg"
+filepath4 = "grace_resized4.jpg"
+
+original,M,N = in_out.read_image(filepath)
+image1,M1,N1 = in_out.read_image(filepath1)
+image2,M2,N2 = in_out.read_image(filepath2)
+image3,M3,N3 = in_out.read_image(filepath3)
+image4,M4,N4 = in_out.read_image(filepath4)
+
+resized_image1 = processing.resize_nearest_neighbor(image1,1,480,360)
+resized_image2 = processing.resize_nearest_neighbor(image2,1/0.7)
+resized_image3 = processing.resize_bilinear(image3,1/1.3)
+resized_image4 = processing.resize_bilinear(image4,1/0.7)
+
+
+IN_OUT.save_image(resized_image1, "grace_resized_to_orig1.jpg")
+IN_OUT.save_image(resized_image2, "grace_resized_to_orig2.jpg")
+IN_OUT.save_image(resized_image3, "grace_resized_to_orig3.jpg")
+IN_OUT.save_image(resized_image4, "grace_resized_to_orig4.jpg")
+
+diff1 = analysis.compute_difference_image(resized_image1,original)
+equalized_image = processing.hist_equalization(diff1)
+IN_OUT.show_image(diff1)
+IN_OUT.show_image(equalized_image)
+'''
+'''
+# 6.1
+filepath = "c12-85v.jpg"
+image,m,n = in_out.read_image(filepath)
+in_out.show_image(image)
+fragment = in_out.extract_fragment(image,fragment_size=(512, 724))
+in_out.show_image(fragment)
+
+f0 = processing.detector(fragment,20,0.005)
+processing.show_fft(fragment,20)
+print("Средняя частота совпадающих максимумов: ", f0)
+
+processing.suppressor(fragment,f0,0.05)
+processing.show_fft(fragment,20)
+in_out.show_image(fragment)
+'''
+'''
+filepath2 = "u0_2048x2500.jpg"
+image2,m2,n2 = in_out.read_image(filepath2)
+in_out.show_image(image2)
+fragment2 = in_out.extract_fragment(image2,fragment_size=(512,512))
+in_out.show_image(fragment2)
+
+f0 = processing.detector(fragment2,20,0.005)
+processing.show_fft(fragment2,20)
+print("Средняя частота совпадающих максимумов: ", f0)
+
+processing.suppressor(fragment2,f0,0.05)
+processing.show_fft(fragment2,20)
+in_out.show_image(fragment2)
+'''
+# 7.1
+'''
+filepath = "MODELimage.jpg"
+image,m,n = in_out.read_image(filepath)
+in_out.show_image(image,"MODELimage")
+
+random_noise_image = model.add_random_noise(image,5)
+in_out.show_image(random_noise_image,"Случайный шум")
+
+impulsive_noise_image = model.add_impulse_noise(image)
+in_out.show_image(impulsive_noise_image,"Импульсный шум")
+
+mixed_noise_image = model.add_mixed_noise(image,0.04,5)
+in_out.show_image(mixed_noise_image,"Смесь 2 шумов")
+
+mean_filter_image = processing.apply_mean_filter(mixed_noise_image,3)
+in_out.show_image(mean_filter_image,"Усредняющий арифметичский фильтр")
+
+median_filter_image = processing.apply_median_filter(mixed_noise_image,5)
+in_out.show_image(median_filter_image,"Медианный фильтр")
+'''
+
+
+# 8.1
+'''
+N = 1000
+A0 = 100
+delta_t = 0.001
+f0 = 15
+harm_data = model.harm(N,A0,f0,delta_t)
+
+Re,Im = analysis.Fourier(harm_data,N)
+recovered_signal = analysis.inverseFourier(Re,Im,N)
+
+
+# Графики
+plt.figure(figsize=(10, 4))
+
+# Исходный сигнал
+plt.subplot(1, 2, 1)
+plt.plot(harm_data, color="b")
+plt.xlabel("N")
+plt.ylabel("Амплитуда")
+plt.title("Исходный сигнал")
+plt.legend()
+plt.grid()
+
+# Восстановленный сигнал
+plt.subplot(1, 2, 2)
+plt.plot(recovered_signal, color="r")
+plt.xlabel("N")
+plt.ylabel("Амплитуда")
+plt.title("Восстановленный сигнал")
+plt.grid()
+
+plt.tight_layout()
+plt.show()
+
+# --- Создание тестового изображения ---
+M, N = 256, 256  # Размер изображения
+m, n = 20, 30    # Размер белого прямоугольника
+
+# Чёрный фон
+image = np.zeros((M, N))
+
+# Вставляем белый прямоугольник в центр
+start_x, start_y = (M - m) // 2, (N - n) // 2
+image[start_x:start_x + m, start_y:start_y + n] = 255
+
+
+
+# --- Выполняем 2D-ПФ ---
+fft_2d = analysis.Fourier2D(image)
+
+# --- Центрируем спектр ---
+fft_shifted = np.fft.fftshift(np.abs(fft_2d))  # Модуль спектра + сдвиг
+
+# --- Выполняем обратное ПФ ---
+recovered_image = analysis.inverseFourier2D(fft_2d)
+
+# --- Визуализация ---
+fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+
+axs[0].imshow(image, cmap='gray')
+axs[0].set_title("Исходное изображение")
+
+axs[1].imshow(np.log(1 + fft_shifted), cmap='gray')  # Логарифм для улучшения контраста
+axs[1].set_title("Амплитудный спектр")
+
+axs[2].imshow(recovered_image, cmap='gray')
+axs[2].set_title("Восстановленное изображение")
+
+plt.show()
+
+filepath = "grace.jpg"
+grace_image,m,n = in_out.read_image(filepath)
+
+# --- Выполняем 2D-ПФ ---
+fft_2d = analysis.Fourier2D(grace_image)
+
+# --- Центрируем спектр ---
+fft_shifted = np.fft.fftshift(np.abs(fft_2d))  # Модуль спектра + сдвиг
+
+# --- Выполняем обратное ПФ ---
+recovered_image = analysis.inverseFourier2D(fft_2d)
+
+in_out.show_image(grace_image,"grace.jpg")
+in_out.show_image(recovered_image,"Восстановленное изображение")
+'''
+'''
+A = 1
+f = 7
+dt = 0.005
+M = 200
+N = 1000
+a = 30
+b = 1
+
+# Генерация импульсной характеристики hh
+h1 = model.harm(N, A, f, dt)
+h2 = model.trend('exp_down', a, N, dt)
+h = model.multModel(h1, h2, N)
+hh = h / np.max(h) * 120
+
+# Генерация управляющей функции x
+t = np.arange(0, N * dt, dt)
+x = np.zeros(N)
+impulse_positions = [200, 400, 600, 800]
+impulse_amplitudes = [0.9, 1.0, 1.1, 0.95]
+for pos, amp in zip(impulse_positions, impulse_amplitudes):
+    x[pos] = amp
+
+# Добавление выбросов
+M2 = 8
+R = 10000
+Rs = R * 0.1
+x2 = model.spikes(N, M2, R, Rs)
+x += x2
+
+# Получение кардиограммы (свертка)
+y = model.convModel(x, hh, N, M)
+
+# Добавление 1% шума к кардиограмме
+noise_level = 0.01 * np.max(y)
+n = model.myNoise(len(y), noise_level, dt)
+y_noisy = y + n
+
+# Применение обратной фильтрации
+hh = hh[:len(y)]
+x_restored = Processing.inverseFilter(y, hh, noise=False)
+x_restored_noisy = Processing.inverseFilter(y_noisy, hh, alpha=0.1, noise=True)
+
+# Создаем фигуру с 3 подграфиками для случая без шума
+plt.figure(figsize=(15, 10))
+
+# 1. Исходный сигнал
+plt.subplot(3, 1, 1)
+plt.plot(t[:len(x)], x, 'b-', linewidth=2)
+plt.title('1. Исходный сигнал x(t)')
+plt.xlabel('Время, с')
+plt.ylabel('Амплитуда')
+plt.grid(True)
+
+# 2. Кардиограмма без шума
+plt.subplot(3, 1, 2)
+plt.plot(t[:len(y)], y, 'g-', alpha=0.8)
+plt.title('2. Кардиограмма y(t) (без шума)')
+plt.xlabel('Время, с')
+plt.ylabel('Амплитуда')
+plt.grid(True)
+
+# 3. Результат обратной фильтрации (без шума)
+plt.subplot(3, 1, 3)
+plt.plot(t[:len(x_restored)], x_restored, 'r-', linewidth=1.5)
+plt.title('3. Восстановленный сигнал (обратная фильтрация без шума)')
+plt.xlabel('Время, с')
+plt.ylabel('Амплитуда')
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Создаем фигуру с 3 подграфиками для случая с шумом
+plt.figure(figsize=(15, 10))
+
+# 1. Исходный сигнал
+plt.subplot(3, 1, 1)
+plt.plot(t[:len(x)], x, 'b-', linewidth=2)
+plt.title('1. Исходный сигнал x(t)')
+plt.xlabel('Время, с')
+plt.ylabel('Амплитуда')
+plt.grid(True)
+
+# 2. Кардиограмма с шумом
+plt.subplot(3, 1, 2)
+plt.plot(t[:len(y_noisy)], y_noisy, 'g-', alpha=0.6)
+plt.title('2. Кардиограмма y(t) с шумом (1%)')
+plt.xlabel('Время, с')
+plt.ylabel('Амплитуда')
+plt.grid(True)
+
+# 3. Результат обратной фильтрации (с шумом)
+plt.subplot(3, 1, 3)
+plt.plot(t[:len(x_restored_noisy)], x_restored_noisy, 'r-', linewidth=1.5)
+plt.title('3. Восстановленный сигнал (обратная фильтрация с шумом, α=0.1)')
+plt.xlabel('Время, с')
+plt.ylabel('Амплитуда')
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+'''
+
