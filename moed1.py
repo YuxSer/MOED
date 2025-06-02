@@ -717,6 +717,183 @@ class Processing:
 
         return x_restored
 
+    @staticmethod
+    def create_2d_lpf_filter(shape, cutoff_freq):
+        """Создание 2D ФНЧ фильтра (идеальный фильтр)"""
+        rows, cols = shape
+        crow, ccol = rows // 2, cols // 2
+        mask = np.zeros((rows, cols), np.float32)
+        y, x = np.ogrid[-crow:rows - crow, -ccol:cols - ccol]
+        mask_area = x * x + y * y <= (cutoff_freq * min(rows, cols)) ** 2
+        mask[mask_area] = 1
+        return mask
+
+    @staticmethod
+    def create_2d_hpf_filter(shape, cutoff_freq):
+        """Создание 2D ФВЧ фильтра (идеальный фильтр)"""
+        return 1 - processing.create_2d_lpf_filter(shape, cutoff_freq)
+
+    @staticmethod
+    def apply_frequency_filter(image, filter_type='lpf', cutoff_freq=0.2):
+        """Применение частотного фильтра к изображению"""
+        # Прямое 2D Фурье-преобразование
+        fft_image = Analysis.Fourier2D(image)
+        fft_shifted = np.fft.fftshift(fft_image)
+
+        # Создание фильтра
+        if filter_type == 'lpf':
+            filter_mask = processing.create_2d_lpf_filter(image.shape, cutoff_freq)
+        elif filter_type == 'hpf':
+            filter_mask = processing.create_2d_hpf_filter(image.shape, cutoff_freq)
+        else:
+            raise ValueError("Неизвестный тип фильтра")
+
+        # Применение фильтра
+        filtered_fft = fft_shifted * filter_mask
+
+        # Обратное преобразование Фурье
+        filtered_fft = np.fft.ifftshift(filtered_fft)
+        filtered_image = Analysis.inverseFourier2D(filtered_fft)
+
+        return np.real(filtered_image)
+
+    @staticmethod
+    def detect_contours(image, lpf_cutoff=0.1, hpf_cutoff=0.3, threshold=0.1):
+        """Выделение контуров с помощью комбинации ФНЧ и ФВЧ фильтров"""
+        # 1. Применение ФНЧ фильтра
+        low_filtered = processing.apply_frequency_filter(image, 'lpf', lpf_cutoff)
+
+        # 2. Применение ФВЧ фильтра к оригинальному изображению
+        high_filtered = processing.apply_frequency_filter(image, 'hpf', hpf_cutoff)
+
+        # 3. Комбинация результатов
+        contours = np.abs(high_filtered) * (1 - low_filtered / np.max(low_filtered))
+
+        # 4. Пороговая обработка
+        contours = (contours > threshold * np.max(contours)) * 255
+
+        return contours.astype(np.uint8)
+
+    @staticmethod
+    def process_image_pipeline(original):
+        # 1. Загрузка изображения
+
+        # 2. Бинаризация для визуализации
+        binary = Processing.log_transformation(original, C=1)
+
+        # 3. Выделение контуров
+        contours = processing.detect_contours(original)
+
+        # 4. Визуализация в стиле вашего примера
+        fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+
+        # Первая строка: изображения
+        axs[0, 0].imshow(original, cmap='gray')
+        axs[0, 0].set_title('Исходное изображение')
+        axs[0, 0].axis('off')
+
+        axs[0, 1].imshow(binary, cmap='gray')
+        axs[0, 1].set_title('Бинаризованное')
+        axs[0, 1].axis('off')
+
+        axs[0, 2].imshow(contours, cmap='gray')
+        axs[0, 2].set_title('Контуры')
+        axs[0, 2].axis('off')
+
+        # Вторая строка: гистограммы
+        axs[1, 0].hist(original.ravel(), bins=256, range=(0, 256))
+        axs[1, 0].set_title('Гистограмма исходного')
+        axs[1, 0].set_xlim(0, 256)
+
+        axs[1, 1].hist(binary.ravel(), bins=256, range=(0, 256))
+        axs[1, 1].set_title('Гистограмма бинарного')
+        axs[1, 1].set_xlim(0, 256)
+
+        axs[1, 2].hist(contours.ravel(), bins=256, range=(0, 256))
+        axs[1, 2].set_title('Гистограмма контуров')
+        axs[1, 2].set_xlim(0, 256)
+
+        plt.tight_layout()
+        plt.show()
+
+    # Функции фильтрации
+    @staticmethod
+    def apply_mask(image, kernel):
+        return cv2.filter2D(image, -1, kernel)
+
+    @staticmethod
+    def threshold(image, thresh):
+        _, binary = cv2.threshold(image, thresh, 255, cv2.THRESH_BINARY)
+        return binary
+
+    @staticmethod
+    def gradient_previt(image):
+        kernel_x = np.array([[1, 0, -1],
+                             [1, 0, -1],
+                             [1, 0, -1]])
+        kernel_y = np.array([[1, 1, 1],
+                             [0, 0, 0],
+                             [-1, -1, -1]])
+
+        gx = processing.apply_mask(image, kernel_x)
+        gy = processing.apply_mask(image, kernel_y)
+        grad = cv2.magnitude(gx.astype(np.float32), gy.astype(np.float32))
+        return grad, gx, gy
+
+    @staticmethod
+    def gradient_sobel(image):
+        gx = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=3)
+        grad = cv2.magnitude(gx, gy)
+        return grad, gx, gy
+
+    @staticmethod
+    def laplacian_edge(image):
+        lap = cv2.Laplacian(image, cv2.CV_64F)
+        return np.abs(lap)
+
+    @staticmethod
+    def erosion(image, mask):
+        """Морфологическая эрозия"""
+        h, w = image.shape
+        mh, mw = mask.shape
+        pad_h, pad_w = mh // 2, mw // 2
+        padded = np.pad(image, ((pad_h, pad_h), (pad_w, pad_w)), mode='constant', constant_values=0)
+        result = np.zeros_like(image)
+
+        for i in range(h):
+            for j in range(w):
+                neighborhood = padded[i:i + mh, j:j + mw]
+                result[i, j] = np.min(neighborhood * mask)
+
+        return result
+
+    @staticmethod
+    def dilation(image, mask):
+        """Морфологическая дилатация"""
+        h, w = image.shape
+        mh, mw = mask.shape
+        pad_h, pad_w = mh // 2, mw // 2
+        padded = np.pad(image, ((pad_h, pad_h), (pad_w, pad_w)), mode='constant', constant_values=0)
+        result = np.zeros_like(image)
+
+        for i in range(h):
+            for j in range(w):
+                neighborhood = padded[i:i + mh, j:j + mw]
+                result[i, j] = np.max(neighborhood * mask)
+        return result
+
+    @staticmethod
+    def morphological_contours(image, method='erosion', mask_size=3):
+        """Выделение контуров морфологическими методами"""
+        mask = np.ones((mask_size, mask_size))
+        if method == 'erosion':
+            eroded = processing.erosion(image, mask)
+            return image - eroded
+        else:
+            dilated = processing.dilation(image, mask)
+            return dilated - image
+
 
 class IN_OUT:
     @staticmethod
@@ -2060,4 +2237,242 @@ plt.grid(True)
 plt.tight_layout()
 plt.show()
 '''
+# 10
+'''
+# Загрузка изображения
+filepath = "grace.jpg"
+image, M, N = IN_OUT.read_image(filepath)
+IN_OUT.show_image(image, "Исходное изображение")
 
+# Параметры
+scale_factor = 1.25  # 1.n (например, 1.25 для n=25)
+
+# a) Прямое 2D ПФ
+fft_2d = Analysis.Fourier2D(image)
+
+# b) Дополнение спектра нулями
+M_new, N_new = int(M * scale_factor), int(N * scale_factor)
+fft_shifted = np.fft.fftshift(fft_2d)  # Центрируем спектр
+
+# Вычисляем, сколько нулей добавить по каждому измерению
+pad_rows = (M_new - M) // 2
+pad_cols = (N_new - N) // 2
+
+# Дополняем нулями (в центре каждого квадранта)
+padded_fft = np.pad(fft_shifted,
+                    ((pad_rows, pad_rows), (pad_cols, pad_cols)),
+                    mode='constant')
+
+# Возвращаем спектр в исходное положение
+padded_fft = np.fft.ifftshift(padded_fft)
+
+# c) Обратное 2D ПФ
+enlarged_image = Analysis.inverseFourier2D(padded_fft)
+enlarged_image = np.real(enlarged_image)  # Берем действительную часть
+enlarged_image = np.clip(enlarged_image, 0, 255).astype(np.uint8)  # Нормализация
+
+# Сохранение и отображение
+IN_OUT.show_image(enlarged_image, f"Увеличенное изображение (x{scale_factor})")
+IN_OUT.save_image(enlarged_image, "grace_enlarged_fft.jpg")
+
+# Параметры
+scale_factor = 0.8  # 0.m (например, 0.8 для m=8)
+
+# a) Прямое 2D ПФ
+fft_2d = Analysis.Fourier2D(image)
+
+# b) 2D ФНЧ фильтрация
+fft_shifted = np.fft.fftshift(fft_2d)  # Центрируем спектр
+
+# Создаем 2D ФНЧ фильтр
+rows, cols = image.shape
+crow, ccol = rows // 2, cols // 2
+cutoff_freq = scale_factor * 0.5  # Частота среза
+
+# Маска фильтра (круг с радиусом cutoff_freq)
+mask = np.zeros((rows, cols), np.float32)
+y, x = np.ogrid[-crow:rows-crow, -ccol:cols-ccol]
+mask_area = x*x + y*y <= (cutoff_freq * min(rows, cols))**2
+mask[mask_area] = 1
+
+# Применяем фильтр
+filtered_fft = fft_shifted * mask
+
+# c) Удаление высоких частот (уменьшение размеров спектра)
+M_new, N_new = int(M * scale_factor), int(N * scale_factor)
+start_row = crow - M_new // 2
+start_col = ccol - N_new // 2
+cropped_fft = filtered_fft[start_row:start_row+M_new, start_col:start_col+N_new]
+
+# Возвращаем спектр в исходное положение
+cropped_fft = np.fft.ifftshift(cropped_fft)
+
+# d) Обратное 2D ПФ
+reduced_image = Analysis.inverseFourier2D(cropped_fft)
+reduced_image = np.real(reduced_image)
+reduced_image = np.clip(reduced_image, 0, 255).astype(np.uint8)
+
+# e) Оценка качества
+# Масштабируем уменьшенное изображение обратно до исходных размеров для сравнения
+resized_back = processing.resize_bilinear(reduced_image, target_size_w=N, target_size_h=M)
+difference = Analysis.compute_difference_image(image, resized_back)
+equalized_diff = processing.hist_equalization(difference)
+
+# f) Визуализация
+plt.figure(figsize=(15, 10))
+
+# Спектры
+plt.subplot(2, 2, 1)
+plt.imshow(np.log(1 + np.abs(fft_shifted)), cmap='gray')
+plt.title('Спектр исходного изображения')
+
+plt.subplot(2, 2, 2)
+plt.imshow(np.log(1 + np.abs(filtered_fft)), cmap='gray')
+plt.title('Спектр после уменьшения изображения')
+
+# Гистограммы
+plt.subplot(2, 2, 3)
+plt.hist(image.ravel(), 256, [0, 256])
+plt.title('Гистограмма исходного изображения')
+
+plt.subplot(2, 2, 4)
+plt.hist(reduced_image.ravel(), 256, [0, 256])
+plt.title('Гистограмма уменьшенного изображения')
+
+plt.tight_layout()
+plt.show()
+
+# Сохранение результатов
+IN_OUT.show_image(reduced_image, f"Уменьшенное изображение (x{scale_factor})")
+IN_OUT.save_image(reduced_image, "grace_reduced_fft.jpg")
+IN_OUT.show_image(equalized_diff, "Разностное изображение (с градационным преобразованием)")
+IN_OUT.save_image(equalized_diff, "grace_difference.jpg")
+
+'''
+'''
+filepath = "MODELimage.jpg"
+image,m,n = in_out.read_image(filepath)
+in_out.show_image(image,"MODELimage")
+
+random_noise_image = model.add_random_noise(image,5)
+in_out.show_image(random_noise_image,"Случайный шум")
+
+impulsive_noise_image = model.add_impulse_noise(image)
+in_out.show_image(impulsive_noise_image,"Импульсный шум")
+
+mixed_noise_image = model.add_mixed_noise(image,0.04,5)
+in_out.show_image(mixed_noise_image,"Смесь 2 шумов")
+
+mean_filter_image = processing.apply_mean_filter(mixed_noise_image,3)
+in_out.show_image(mean_filter_image,"Усредняющий арифметичский фильтр")
+
+median_filter_image = processing.apply_median_filter(mixed_noise_image,5)
+in_out.show_image(median_filter_image,"Медианный фильтр")
+
+original, M, N = IN_OUT.read_image("grace.jpg")
+processing.process_image_pipeline(original)
+'''
+'''
+image = cv2.imread('birches.jpg', cv2.IMREAD_GRAYSCALE)
+if image is None:
+    raise FileNotFoundError("Изображение 'grace.jpg' не найдено.")
+
+
+
+
+
+# ===== Градиент Превита =====
+grad_p, gx_p, gy_p = processing.gradient_previt(image)
+plt.figure(figsize=(12, 6))
+plt.suptitle("Градиент Превита")
+plt.subplot(2, 3, 1), plt.imshow(image, cmap='gray'), plt.title("Оригинал")
+plt.subplot(2, 3, 2), plt.imshow(gx_p, cmap='gray'), plt.title("Gx")
+plt.subplot(2, 3, 3), plt.imshow(gy_p, cmap='gray'), plt.title("Gy")
+plt.subplot(2, 3, 5), plt.imshow(processing.threshold(grad_p.astype(np.uint8), 50), cmap='gray'), plt.title("Итоговое изображение")
+
+plt.tight_layout()
+plt.show()
+
+# ===== Градиент Собела =====
+grad_s, gx_s, gy_s = processing.gradient_sobel(image)
+plt.figure(figsize=(12, 6))
+plt.suptitle("Градиент Собела")
+plt.subplot(2, 3, 1), plt.imshow(image, cmap='gray'), plt.title("Оригинал")
+plt.subplot(2, 3, 2), plt.imshow(gx_s, cmap='gray'), plt.title("Gx")
+plt.subplot(2, 3, 3), plt.imshow(gy_s, cmap='gray'), plt.title("Gy")
+plt.subplot(2, 3, 5), plt.imshow(processing.threshold(grad_s.astype(np.uint8), 50), cmap='gray'), plt.title("Итоговое изображение")
+plt.tight_layout()
+plt.show()
+
+# ===== Лапласиан =====
+lap = processing.laplacian_edge(image)
+alpha = 1.3
+res = image - alpha * lap
+plt.figure(figsize=(10,5))
+plt.suptitle("Лапласиан")
+plt.subplot(1, 2, 1), plt.imshow(image, cmap='gray'), plt.title("Оригинал")
+plt.subplot(1, 2, 2), plt.imshow(lap, cmap='gray'), plt.title("Итоговое изображение")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10,5))
+plt.imshow(image, cmap='gray'), plt.title("Оригинал")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10,5))
+plt.imshow(lap, cmap='gray'), plt.title("Выделенные контуры Лапласианом")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10,5))
+plt.imshow(res, cmap='gray'), plt.title("Итоговое изображение")
+plt.tight_layout()
+plt.show()
+'''
+filepath = "MODELimage.jpg"
+image,m,n = in_out.read_image(filepath)
+filepath2 = "grace.jpg"
+image2,m2,n2 = in_out.read_image(filepath2)
+
+random_noise_image = model.add_random_noise(image,5)
+
+
+impulsive_noise_image = model.add_impulse_noise(image)
+
+
+mixed_noise_image = model.add_mixed_noise(image,0.04,5)
+
+
+mean_filter_image = processing.apply_mean_filter(mixed_noise_image,3)
+
+
+median_filter_image = processing.apply_median_filter(mixed_noise_image,5)
+
+
+binary = (image2 > 128).astype(np.uint8) * 255
+
+# Выделение контуров разными методами
+contours_erosion = processing.morphological_contours(binary, 'erosion', 7)
+contours_dilation = processing.morphological_contours(binary, 'dilation', 7)
+
+# Визуализация
+plt.figure(figsize=(15, 5))
+
+plt.subplot(1, 3, 1)
+plt.imshow(binary, cmap='gray')
+plt.title('Исходное бинарное')
+plt.axis('off')
+
+plt.subplot(1, 3, 2)
+plt.imshow(contours_erosion, cmap='gray')
+plt.title('Контуры через эрозию')
+plt.axis('off')
+
+plt.subplot(1, 3, 3)
+plt.imshow(contours_dilation, cmap='gray')
+plt.title('Контуры через дилатацию')
+plt.axis('off')
+
+plt.tight_layout()
+plt.show()
